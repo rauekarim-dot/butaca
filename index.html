@@ -276,6 +276,14 @@ select{
   margin-top:6px;
   display:block;
 }
+.poster-img{
+  position:absolute;inset:0;
+  width:100%;height:100%;
+  object-fit:cover;
+  z-index:1;
+  animation:posterFadeIn .35s ease;
+}
+@keyframes posterFadeIn{from{opacity:0;}to{opacity:1;}}
 .card-id{
   position:absolute;top:8px;left:8px;
   font-family:'IBM Plex Mono',monospace;
@@ -693,12 +701,93 @@ const PROFILE_KEY = 'butaca_profile_code';
    Pegá acá la URL y la clave "anon public" de tu proyecto
    de Supabase. Instrucciones completas en SETUP.md.
    ========================================================= */
-const SUPABASE_URL = "https://cqtbzvtnzatykpdorcdt.supabase.co";        // ej: https://abcdefgh.supabase.co
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNxdGJ6dnRuemF0eWtwZG9yY2R0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3MTcwMTksImV4cCI6MjEwMzI5MzAxOX0.Gk9wGv7SaHZt6eBw7-FYIIX02vQPcRlIvMJ6MbEZSIk";
+const SUPABASE_URL = "PEGA_AQUI_TU_SUPABASE_URL";        // ej: https://abcdefgh.supabase.co
+const SUPABASE_ANON_KEY = "PEGA_AQUI_TU_SUPABASE_ANON_KEY";
 const SUPABASE_TABLE = "butaca_progress";
 
 const CLOUD_CONFIGURED = SUPABASE_URL && !SUPABASE_URL.includes('PEGA_AQUI') &&
                           SUPABASE_ANON_KEY && !SUPABASE_ANON_KEY.includes('PEGA_AQUI');
+
+/* =========================================================
+   CONFIGURACIÓN DE PÓSTERS (TMDB — The Movie Database)
+   Pegá acá tu API Key (v3 auth) gratuita de themoviedb.org.
+   Instrucciones completas en SETUP.md.
+   Si no la configurás, la app sigue funcionando con los
+   pósters ilustrados que ya tenía — no se rompe nada.
+   ========================================================= */
+const TMDB_API_KEY = "238f1e6b24515a411ec8557b93f86226";
+const TMDB_CONFIGURED = TMDB_API_KEY && !TMDB_API_KEY.includes('PEGA_AQUI');
+const POSTER_CACHE_KEY = 'butaca_posters_v1';
+let posterCache = {};
+try{
+  const rawPosters = localStorage.getItem(POSTER_CACHE_KEY);
+  posterCache = rawPosters ? JSON.parse(rawPosters) : {};
+}catch(e){ posterCache = {}; }
+const savePosterCache = debounce(() => {
+  try{ localStorage.setItem(POSTER_CACHE_KEY, JSON.stringify(posterCache)); }catch(e){ /* ignore */ }
+}, 800);
+const posterFetchInFlight = new Set();
+
+async function fetchPosterFor(movie){
+  if(!TMDB_CONFIGURED) return;
+  if(posterCache[movie.id] !== undefined) return;
+  if(posterFetchInFlight.has(movie.id)) return;
+  posterFetchInFlight.add(movie.id);
+  try{
+    const url = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(movie.title)}&year=${movie.year}&language=es-ES`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('TMDB status ' + res.status);
+    const json = await res.json();
+    const hit = (json.results && json.results.length) ? json.results[0] : null;
+    posterCache[movie.id] = (hit && hit.poster_path) ? `https://image.tmdb.org/t/p/w342${hit.poster_path}` : null;
+  }catch(e){
+    posterCache[movie.id] = null;
+  }
+  savePosterCache();
+  applyPosterToDOM(movie.id);
+  posterFetchInFlight.delete(movie.id);
+}
+
+function applyPosterToDOM(id){
+  const url = posterCache[id];
+  if(!url) return;
+  document.querySelectorAll(`.card[data-id="${id}"] .poster-wrap`).forEach(wrap => {
+    if(wrap.querySelector('img.poster-img')) return;
+    const img = document.createElement('img');
+    img.className = 'poster-img';
+    img.loading = 'lazy';
+    img.alt = '';
+    img.src = url;
+    wrap.appendChild(img);
+  });
+  const modalWrap = document.getElementById('modalPosterWrap');
+  if(modalWrap && modalWrap.dataset.id === id && !modalWrap.querySelector('img.poster-img')){
+    const img = document.createElement('img');
+    img.className = 'poster-img';
+    img.alt = '';
+    img.src = url;
+    modalWrap.appendChild(img);
+  }
+}
+
+let posterObserver = null;
+function observePosters(){
+  if(!TMDB_CONFIGURED) return;
+  if(posterObserver) posterObserver.disconnect();
+  posterObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if(!entry.isIntersecting) return;
+      const card = entry.target;
+      const id = card.dataset.id;
+      const m = byId(id);
+      posterObserver.unobserve(card);
+      if(!m) return;
+      if(posterCache[id] !== undefined){ applyPosterToDOM(id); return; }
+      fetchPosterFor(m);
+    });
+  }, { rootMargin: '250px' });
+  document.querySelectorAll('.card').forEach(card => posterObserver.observe(card));
+}
 
 let PROFILE_ID = localStorage.getItem(PROFILE_KEY) || null;
 let syncTimer = null;
@@ -956,7 +1045,10 @@ function renderGrid(){
 
   container.querySelectorAll('.card').forEach(el => {
     el.addEventListener('click', () => openModal(el.dataset.id));
+    const id = el.dataset.id;
+    if(posterCache[id]) applyPosterToDOM(id);
   });
+  observePosters();
 }
 
 function cardHTML(m){
@@ -999,7 +1091,7 @@ function openModal(id){
   const modal = document.getElementById('movieModal');
   modal.innerHTML = `
     <div class="modal-top">
-      <div class="modal-poster" style="background:linear-gradient(155deg,${a},${b});">
+      <div class="modal-poster" id="modalPosterWrap" data-id="${m.id}" style="background:linear-gradient(155deg,${a},${b});">
         <button class="modal-close" id="closeModal">✕</button>
         <div>
           <div class="p-title">${escapeHTML(m.title)}</div>
@@ -1095,6 +1187,9 @@ function openModal(id){
       renderDash(); renderGrid();
     };
   }
+
+  if(posterCache[id]) applyPosterToDOM(id);
+  else if(TMDB_CONFIGURED) fetchPosterFor(m);
 
   document.getElementById('movieOverlay').classList.add('open');
 }
